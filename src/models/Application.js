@@ -21,7 +21,8 @@ const applicationSchema = new mongoose.Schema(
     details: { type: mongoose.Schema.Types.Mixed, default: {} },
     status: { type: String, enum: STATUS_LIST, default: STATUS.SUBMITTED, index: true },
     assignedManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Manager' }, // legacy
-    assignedLenderId: { type: mongoose.Schema.Types.ObjectId, ref: 'LenderApplication' },
+    assignedLenderId: { type: mongoose.Schema.Types.ObjectId, ref: 'LenderApplication' }, // most recent
+    sharedLenderIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LenderApplication' }], // all lenders shared with
     forwardedAt: { type: Date },
     sharedToManagerAt: { type: Date },
     rejectionReason: { type: String, trim: true },

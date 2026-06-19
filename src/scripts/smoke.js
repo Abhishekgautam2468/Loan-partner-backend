@@ -33,6 +33,7 @@ async function step(name, fn) {
 const expect = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 let custToken, adminToken, appId, onboardedLenderId, docless;
+let setupToken, setupEmail;
 
 await step('GET /health', async () => {
   const r = await fetch(`${base}/health`); const d = await j(r);
@@ -68,7 +69,31 @@ await step('public application (no login)', async () => {
   const fields = { fullName: 'Walk In', phone: '8888888888', email: 'walkin@example.com', aadhaarNumber: '210987654321', panNumber: 'ZYXWV9876K', loanType: 'Home Loan', amountRequested: '2500000', tenureMonths: '120', details: JSON.stringify({ employmentType: 'Salaried', financial: { bankName: 'HDFC' } }) };
   Object.entries(fields).forEach(([k, v]) => fd.append(k, v));
   const r = await fetch(`${base}/public/applications`, { method: 'POST', body: fd });
-  const d = await j(r); expect(r.status === 201 && d.application?._id, `status ${r.status}`);
+  const d = await j(r);
+  expect(r.status === 201 && d.application?._id, `status ${r.status}`);
+  expect(d.account && d.account.exists === false && d.account.setupToken, 'no setup token for new account');
+  setupToken = d.account.setupToken; setupEmail = d.account.email;
+});
+
+await step('set password via setup token → returns JWT', async () => {
+  const r = await fetch(`${base}/auth/reset-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: setupEmail, token: setupToken, password: 'WalkIn@123' }) });
+  const d = await j(r); expect(r.status === 200 && d.token && d.user, `status ${r.status}`);
+});
+
+await step('login with the new password', async () => {
+  const r = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: setupEmail, password: 'WalkIn@123' }) });
+  const d = await j(r); expect(r.status === 200 && d.token, `status ${r.status}`);
+});
+
+await step('walk-in account sees its linked application', async () => {
+  const login = await j(await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: setupEmail, password: 'WalkIn@123' }) }));
+  const d = await j(await fetch(`${base}/applications/mine`, { headers: { Authorization: `Bearer ${login.token}` } }));
+  expect(d.applications.length === 1 && d.applications[0].loanType === 'Home Loan', `linked ${d.applications.length}`);
+});
+
+await step('forgot-password responds 200 (OTP emailed)', async () => {
+  const r = await fetch(`${base}/auth/forgot-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: setupEmail }) });
+  expect(r.status === 200, `status ${r.status}`);
 });
 
 await step('public lender application (no login)', async () => {
@@ -112,6 +137,28 @@ await step('admin lists, opens & updates lender application', async () => {
   onboardedLenderId = lid;
 });
 
+await step('public referrer application (no login)', async () => {
+  const r = await fetch(`${base}/public/referrer-applications`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fullName: 'Rohit Mehta', referrerType: 'DSA', email: 'rohit@dsa.com', phone: '6666666666', products: ['Personal Loan'] }),
+  });
+  const d = await j(r); expect(r.status === 201 && d.application?._id, `status ${r.status}`);
+});
+
+await step('admin lists, opens, updates & deletes referrer', async () => {
+  const list = await j(await fetch(`${base}/admin/referrer-applications`, { headers: A() }));
+  expect(list.referrers.length >= 1, 'no referrer applications');
+  const rid = list.referrers[0]._id;
+  const detail = await j(await fetch(`${base}/admin/referrer-applications/${rid}`, { headers: A() }));
+  expect(detail.referrer && detail.referrer.fullName, 'referrer detail missing');
+  const upd = await fetch(`${base}/admin/referrer-applications/${rid}`, { method: 'PATCH', headers: A(), body: JSON.stringify({ status: 'onboarded' }) });
+  const ud = await j(upd); expect(upd.status === 200 && ud.referrer.status === 'onboarded', `update failed (${upd.status})`);
+  const created = await j(await fetch(`${base}/admin/referrer-applications`, { method: 'POST', headers: A(), body: JSON.stringify({ fullName: 'Manual DSA', referrerType: 'Consultant', email: 'm@dsa.com', phone: '5555555555' }) }));
+  expect(created.referrer?._id, 'admin create referrer failed');
+  const del = await fetch(`${base}/admin/referrer-applications/${created.referrer._id}`, { method: 'DELETE', headers: A() });
+  expect(del.status === 200, `delete failed (${del.status})`);
+});
+
 await step('illegal transition blocked (Submitted→Approved)', async () => {
   const r = await fetch(`${base}/admin/applications/${appId}/status`, { method: 'PATCH', headers: A(), body: JSON.stringify({ toStatus: 'Approved' }) });
   expect(r.status === 400, `expected 400 got ${r.status}`);
@@ -132,6 +179,22 @@ await step('share approved app to onboarded lender (email dev-logged)', async ()
 await step('stats reflect 1 approved', async () => {
   const d = await j(await fetch(`${base}/admin/stats`, { headers: A() }));
   expect(d.counts.approved === 1 && d.counts.assigned === 1, JSON.stringify(d.counts));
+});
+
+await step('re-apply (decided category) with reuseDocumentsFrom', async () => {
+  // appId is now Approved, so re-applying the same category is allowed.
+  const fd = new FormData();
+  Object.entries({ fullName: 'Asha Rao', phone: '9999999999', email: 'asha@example.com', aadhaarNumber: '123456789012', panNumber: 'ABCDE1234F', loanType: 'Personal Loan', amountRequested: '600000', purpose: 'Re-apply', reuseDocumentsFrom: appId }).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(`${base}/applications`, { method: 'POST', headers: { Authorization: `Bearer ${custToken}` }, body: fd });
+  const d = await j(r); expect(r.status === 201 && d.application._id !== appId, `status ${r.status}`);
+});
+
+await step('duplicate pending category blocked (409)', async () => {
+  // The re-applied Personal Loan is now pending → another must be blocked.
+  const fd = new FormData();
+  Object.entries({ fullName: 'Asha Rao', phone: '9999999999', email: 'asha@example.com', aadhaarNumber: '123456789012', panNumber: 'ABCDE1234F', loanType: 'Personal Loan', amountRequested: '700000' }).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(`${base}/applications`, { method: 'POST', headers: { Authorization: `Bearer ${custToken}` }, body: fd });
+  expect(r.status === 409, `expected 409 got ${r.status}`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

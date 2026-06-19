@@ -3,14 +3,20 @@ import env from '../config/env.js';
 import EmailLog from '../models/EmailLog.js';
 
 let transporter = null;
+// A value is "real" only if present and not a left-over placeholder like <smtp-host>.
+const configured = (v) => !!v && !/[<>]/.test(v);
+
 function getTransporter() {
   if (transporter) return transporter;
-  if (env.smtp.host && env.smtp.user) {
+  const host = (env.smtp.host || '').trim();
+  const user = (env.smtp.user || '').trim();
+  const pass = (env.smtp.pass || '').replace(/\s+/g, ''); // app passwords are entered without spaces
+  if (configured(host) && configured(user)) {
     transporter = nodemailer.createTransport({
-      host: env.smtp.host,
+      host,
       port: env.smtp.port,
       secure: env.smtp.port === 465,
-      auth: { user: env.smtp.user, pass: env.smtp.pass },
+      auth: { user, pass },
     });
   }
   return transporter;

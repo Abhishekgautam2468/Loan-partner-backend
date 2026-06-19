@@ -12,9 +12,9 @@ async function fetchAttachment(doc) {
   return { filename: doc.originalName, content: buf, contentType: doc.mimeType };
 }
 
-// Email a lending partner the approved application's details + all documents as raw attachments.
+// Email a lending partner the approved application's details + its VERIFIED documents as attachments.
 export async function shareApplicationToLender(app, lender) {
-  const docs = await Document.find({ applicationId: app._id });
+  const docs = await Document.find({ applicationId: app._id, verificationStatus: 'verified' });
   const attachments = [];
   for (const d of docs) {
     try {

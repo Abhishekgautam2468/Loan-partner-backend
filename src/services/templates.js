@@ -31,19 +31,67 @@ export const statusEmail = (app, toStatus, remarks) => {
   };
 };
 
-export const managerShareEmail = (app) => ({
-  subject: `Approved loan application forwarded — ${app.fullName} (${app._id})`,
-  html: wrap('Approved Application — For Your Review', `
-    <p style="font-size:15px;line-height:1.6;">An approved loan application has been shared with you.</p>
-    <table style="font-size:14px;color:#3A3F47;border-collapse:collapse;">
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Applicant</td><td>${app.fullName}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Phone</td><td>${app.phone}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Email</td><td>${app.email}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Aadhaar</td><td>${app.aadhaarNumber}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">PAN</td><td>${app.panNumber}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Loan type</td><td>${app.loanType}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Amount</td><td>₹${app.amountRequested}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6B7077;">Application ID</td><td>${app._id}</td></tr>
-    </table>
-    <p style="font-size:13px;color:#8A8F98;margin-top:16px;">All uploaded documents are attached to this email.</p>`),
+export const passwordOtpEmail = (otp) => ({
+  subject: `Your TrioPaisa verification code: ${otp}`,
+  html: wrap('Your verification code', `
+    <p style="font-size:15px;line-height:1.6;">Use the code below to set or reset your TrioPaisa password. It is valid for 15 minutes.</p>
+    <div style="font-family:'Plus Jakarta Sans',Arial,sans-serif;font-size:34px;font-weight:800;letter-spacing:6px;color:#0F1115;background:#FFF6EE;border:1px solid #FBE3CC;border-radius:12px;padding:18px;text-align:center;margin:14px 0;">${otp}</div>
+    <p style="font-size:13px;color:#8A8F98;">If you didn't request this, you can safely ignore this email.</p>`),
 });
+
+export const managerShareEmail = (app) => {
+  const d = app.details || {};
+  const p = d.personal || {};
+  const emp = d.employmentType === 'Self-Employed' ? (d.selfEmployed || {}) : (d.salaried || {});
+  const fin = d.financial || {};
+  const inr = (v) => (v !== undefined && v !== null && v !== '' && !isNaN(Number(v))) ? `₹${Number(v).toLocaleString('en-IN')}` : (v || '');
+  const addr = (x) => x ? [x.line1, x.line2, x.city, x.state, x.pincode].filter(Boolean).join(', ') : '';
+
+  const row = (k, v) => (v === undefined || v === null || v === '' ? '' :
+    `<tr><td style="padding:4px 14px 4px 0;color:#6B7077;white-space:nowrap;vertical-align:top;">${k}</td><td style="vertical-align:top;">${v}</td></tr>`);
+  const section = (title, rows) => {
+    const inner = rows.join('');
+    return inner ? `<h3 style="font-size:14px;margin:18px 0 6px;color:#0F1115;">${title}</h3><table style="font-size:14px;color:#3A3F47;border-collapse:collapse;width:100%;">${inner}</table>` : '';
+  };
+
+  const refs = (d.references || []).filter((r) => r && r.name);
+
+  const body = `
+    <p style="font-size:15px;line-height:1.6;">A loan application has been shared with you for review.</p>
+    ${section('Loan', [
+      row('Type', app.loanType), row('Amount', inr(app.amountRequested)),
+      row('Tenure', app.tenureMonths ? `${app.tenureMonths} months` : ''),
+      row('Expected ROI', d.expectedRoi ? `${d.expectedRoi}% p.a.` : ''),
+      row('External credit rating', d.externalCreditRating),
+      row('Purpose', app.purpose),
+    ])}
+    ${section('Applicant', [
+      row('Name', app.fullName), row("Father's / Husband's name", p.fatherOrHusbandName),
+      row('Date of birth', p.dob), row('Gender', p.gender), row('Marital status', p.maritalStatus),
+      row('Phone', app.phone), row('Alternate phone', p.alternatePhone), row('Email', app.email),
+      row('Aadhaar', app.aadhaarNumber), row('PAN', app.panNumber),
+    ])}
+    ${section('Address', [
+      row('Current', addr(d.currentAddress)),
+      row('Permanent', d.sameAsCurrent === false ? addr(d.permanentAddress) : (addr(d.currentAddress) ? 'Same as current' : '')),
+    ])}
+    ${section(`Employment${d.employmentType ? ` — ${d.employmentType}` : ''}`, d.employmentType === 'Self-Employed' ? [
+      row('Business name', emp.businessName), row('Business type', emp.businessType), row('GST number', emp.gstNumber),
+      row('Annual turnover', inr(emp.annualTurnover)), row('Monthly income', inr(emp.monthlyIncome)), row('Business address', emp.businessAddress),
+    ] : [
+      row('Company', emp.companyName), row('Designation', emp.designation), row('Experience', emp.experience ? `${emp.experience} yrs` : ''),
+      row('Monthly salary', inr(emp.monthlySalary)), row('Salary bank', emp.salaryBank), row('Office address', emp.officeAddress),
+    ])}
+    ${section('Financial', [
+      row('Existing EMI', inr(fin.existingEmi)), row('Existing loans', fin.existingLoans),
+      row('Credit card outstanding', inr(fin.creditCardOutstanding)), row('Monthly expenses', inr(fin.monthlyExpenses)),
+      row('Bank', fin.bankName), row('Account number', fin.accountNumber), row('IFSC', fin.ifsc),
+    ])}
+    ${section('References', refs.map((r, i) => row(`Reference ${i + 1}`, [r.name, r.relationship, r.phone].filter(Boolean).join(' · '))))}
+    <p style="font-size:13px;color:#8A8F98;margin-top:18px;">Application ID: ${app._id}<br/>Verified documents are attached to this email.</p>`;
+
+  return {
+    subject: `Loan application forwarded — ${app.fullName} (${app._id})`,
+    html: wrap('Loan Application — For Your Review', body),
+  };
+};

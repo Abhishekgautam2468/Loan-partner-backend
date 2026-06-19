@@ -53,6 +53,28 @@ router.patch(
   validate,
   admin.updateLenderApplication
 );
+router.delete('/lender-applications/:id', admin.deleteLender);
+
+router.get('/referrer-applications', admin.listReferrerApplications);
+router.post(
+  '/referrer-applications',
+  [
+    body('fullName').trim().notEmpty().withMessage('Name is required'),
+    body('referrerType').trim().notEmpty().withMessage('Referrer type is required'),
+    body('email').isEmail().withMessage('Valid email required'),
+    body('phone').trim().notEmpty().withMessage('Phone is required'),
+  ],
+  validate,
+  admin.createReferrer
+);
+router.get('/referrer-applications/:id', admin.getReferrerApplication);
+router.patch(
+  '/referrer-applications/:id',
+  [body('status').notEmpty().withMessage('status is required')],
+  validate,
+  admin.updateReferrerApplication
+);
+router.delete('/referrer-applications/:id', admin.deleteReferrer);
 
 router.patch('/documents/:id/verify', docCtrl.verifyDocument);
 

@@ -6,6 +6,7 @@ import { LOAN_TYPES } from '../utils/constants.js';
 import { AADHAAR_RE, PAN_RE } from '../utils/validators.js';
 import * as appCtrl from '../controllers/application.controller.js';
 import * as lenderCtrl from '../controllers/lender.controller.js';
+import * as referrerCtrl from '../controllers/referrer.controller.js';
 
 // Unauthenticated, public-facing endpoints (website "Apply Now" form).
 const router = Router();
@@ -27,6 +28,16 @@ router.post(
 );
 
 router.post(
+  '/application-precheck',
+  [
+    body('panNumber').customSanitizer((v) => String(v || '').toUpperCase()).matches(PAN_RE).withMessage('PAN must be in format ABCDE1234F'),
+    body('loanType').trim().notEmpty().withMessage('Loan type is required'),
+  ],
+  validate,
+  appCtrl.applicationPrecheck
+);
+
+router.post(
   '/lender-applications',
   [
     body('institutionName').trim().notEmpty().withMessage('Institution name is required'),
@@ -37,6 +48,18 @@ router.post(
   ],
   validate,
   lenderCtrl.createLenderApplication
+);
+
+router.post(
+  '/referrer-applications',
+  [
+    body('fullName').trim().notEmpty().withMessage('Name is required'),
+    body('referrerType').trim().notEmpty().withMessage('Referrer type is required'),
+    body('email').isEmail().withMessage('Valid email required'),
+    body('phone').trim().notEmpty().withMessage('Phone is required'),
+  ],
+  validate,
+  referrerCtrl.createReferrerApplication
 );
 
 export default router;

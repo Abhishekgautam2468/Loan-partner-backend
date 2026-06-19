@@ -4,6 +4,7 @@ import { ROLES } from '../utils/constants.js';
 import { signToken } from '../utils/jwt.js';
 import { asyncHandler, ApiError } from '../utils/asyncHandler.js';
 import { sendMail } from '../services/email.service.js';
+import { passwordOtpEmail } from '../services/templates.js';
 import { logActivity } from '../services/activity.service.js';
 
 const issue = (user) => signToken({ sub: user._id.toString(), role: user.role });
@@ -13,7 +14,7 @@ export const register = asyncHandler(async (req, res) => {
   const { name, email, phone, password } = req.body;
   const exists = await User.findOne({ email: email.toLowerCase() });
   if (exists) throw new ApiError(409, 'An account with this email already exists');
-  const user = new User({ name, email, phone, role: ROLES.CUSTOMER });
+  const user = new User({ name, email, phone, role: ROLES.CUSTOMER, passwordSet: true });
   await user.setPassword(password);
   await user.save();
   await logActivity({ actorUserId: user._id, action: 'register', targetType: 'User', targetId: user._id });
@@ -37,38 +38,38 @@ export const me = asyncHandler(async (req, res) => {
   res.json({ user: req.user.toSafeJSON() });
 });
 
+// Sends a 6-digit OTP to the email on record (used for both "forgot password" and
+// setting a password on an auto-created account).
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
   const user = await User.findOne({ email: email.toLowerCase() });
   // Always respond 200 to avoid account enumeration.
   if (user) {
-    const token = crypto.randomBytes(32).toString('hex');
-    user.resetToken = crypto.createHash('sha256').update(token).digest('hex');
-    user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1h
+    const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+    user.resetToken = crypto.createHash('sha256').update(otp).digest('hex');
+    user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
     await user.save();
-    const link = `${process.env.CLIENT_ORIGIN || ''}/reset-password?token=${token}&email=${encodeURIComponent(user.email)}`;
-    await sendMail({
-      to: user.email,
-      type: 'auth',
-      subject: 'Reset your TrioPaisa password',
-      html: `<p>Reset your password using the link below (valid 1 hour):</p><p><a href="${link}">${link}</a></p>`,
-    });
+    const { subject, html } = passwordOtpEmail(otp);
+    await sendMail({ to: user.email, type: 'auth', subject, html });
   }
-  res.json({ message: 'If that email exists, a reset link has been sent.' });
+  res.json({ message: 'If that email exists, a verification code has been sent.' });
 });
 
+// Verifies the OTP / setup code and sets the password. Logs the user in on success.
 export const resetPassword = asyncHandler(async (req, res) => {
   const { email, token, password } = req.body;
-  const hashed = crypto.createHash('sha256').update(token).digest('hex');
+  const hashed = crypto.createHash('sha256').update(String(token).trim()).digest('hex');
   const user = await User.findOne({
     email: email.toLowerCase(),
     resetToken: hashed,
     resetTokenExpiry: { $gt: new Date() },
   });
-  if (!user) throw new ApiError(400, 'Invalid or expired reset token');
+  if (!user) throw new ApiError(400, 'Invalid or expired code');
   await user.setPassword(password);
+  user.passwordSet = true;
   user.resetToken = undefined;
   user.resetTokenExpiry = undefined;
   await user.save();
-  res.json({ message: 'Password updated. You can now log in.' });
+  await logActivity({ actorUserId: user._id, action: 'password.set', targetType: 'User', targetId: user._id });
+  res.json({ token: issue(user), user: user.toSafeJSON() });
 });
