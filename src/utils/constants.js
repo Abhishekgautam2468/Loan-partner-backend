@@ -28,10 +28,6 @@ export const LOAN_TYPES = [
   'Vehicle Loan',
   'Gold Loan',
   'Loan Against Property',
-  'Purchase Invoice Discounting',
-  'Sales Invoice Discounting',
-  'Dealer Finance',
-  'Vendor Finance',
   'Unsecured Business Loan',
 ];
 
