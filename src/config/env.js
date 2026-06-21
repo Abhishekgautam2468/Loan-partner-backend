@@ -1,12 +1,16 @@
 import dotenv from 'dotenv';
-dotenv.config();
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: resolve(__dirname, '../../.env') });
 
 // Treat unfilled placeholders like "<your-domain>" as empty so dev fallbacks work.
 const clean = (v) => (v && !String(v).includes('<') ? v : '');
 const P = (key, fallback = '') => clean(process.env[key]) || fallback;
 
 const env = {
-  port: P('PORT', 5000),
+  port: P('PORT', 9040),
   nodeEnv: P('NODE_ENV', 'development'),
   mongoUri: P('MONGODB_URI', 'mongodb://127.0.0.1:27017/triopaisa_loan_dms'),
   jwtSecret: P('JWT_SECRET', 'dev-insecure-secret-change-me'),
