@@ -31,6 +31,19 @@ export const LOAN_TYPES = [
   'Unsecured Business Loan',
 ];
 
+// Supply Chain Finance products. These are stored as regular Application records
+// (loanType = product name) and reuse the entire loan pipeline. /meta intentionally
+// returns only LOAN_TYPES, so SCF products do not appear in the generic loan dropdown.
+export const SCF_PRODUCTS = [
+  'Purchase Invoice Discounting',
+  'Sales Invoice Discounting',
+  'Dealer Finance',
+  'Vendor Finance',
+];
+
+// Every accepted loanType across loans + SCF (used by the model enum & route validators).
+export const ALL_LOAN_TYPES = [...LOAN_TYPES, ...SCF_PRODUCTS];
+
 export const DOC_VERIFICATION = {
   PENDING: 'pending',
   VERIFIED: 'verified',

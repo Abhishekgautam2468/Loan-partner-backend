@@ -31,6 +31,25 @@ export const statusEmail = (app, toStatus, remarks) => {
   };
 };
 
+// Status-update email sent to a lender/referrer applicant on every pipeline change.
+export const partnerStatusEmail = ({ name, role = 'partner', status }) => {
+  const lines = {
+    reviewing: 'Your application has moved into review by our partnerships team. We will be in touch as it progresses.',
+    onboarded: `Congratulations! You have been onboarded as a TrioPaisa ${role}. Welcome aboard.`,
+    declined: 'After careful review, we are unable to proceed with your application at this time. Thank you for your interest.',
+    blocked: 'Your partner account has been placed on hold. Please contact our partnerships team for details.',
+    new: 'We have received your application. Our partnerships team will review it shortly.',
+  };
+  const label = { reviewing: 'Under Review', onboarded: 'Onboarded', declined: 'Declined', blocked: 'On Hold', new: 'Received' }[status] || status;
+  return {
+    subject: `Your TrioPaisa partnership application — ${label}`,
+    html: wrap(`Application ${label}`, `
+      <p style="font-size:15px;line-height:1.6;">Dear ${name},</p>
+      <p style="font-size:15px;line-height:1.6;">${lines[status] || 'Your application status has been updated.'}</p>
+      <p style="font-size:14px;color:#6B7077;">Status: <strong>${label}</strong></p>`),
+  };
+};
+
 export const passwordOtpEmail = (otp) => ({
   subject: `Your TrioPaisa verification code: ${otp}`,
   html: wrap('Your verification code', `

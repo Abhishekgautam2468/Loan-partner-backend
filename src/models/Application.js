@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { STATUS, STATUS_LIST, LOAN_TYPES } from '../utils/constants.js';
+import { STATUS, STATUS_LIST, ALL_LOAN_TYPES } from '../utils/constants.js';
 
 const applicationSchema = new mongoose.Schema(
   {
@@ -11,7 +11,7 @@ const applicationSchema = new mongoose.Schema(
     email: { type: String, required: true, lowercase: true, trim: true },
     aadhaarNumber: { type: String, required: true, match: /^\d{12}$/ },
     panNumber: { type: String, required: true, uppercase: true, match: /^[A-Z]{5}[0-9]{4}[A-Z]$/ },
-    loanType: { type: String, required: true, enum: LOAN_TYPES },
+    loanType: { type: String, required: true, enum: ALL_LOAN_TYPES },
     amountRequested: { type: Number, required: true, min: 0 },
     tenureMonths: { type: Number, min: 0 },
     purpose: { type: String, trim: true },

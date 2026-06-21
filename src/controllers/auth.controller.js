@@ -43,16 +43,16 @@ export const me = asyncHandler(async (req, res) => {
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
   const user = await User.findOne({ email: email.toLowerCase() });
-  // Always respond 200 to avoid account enumeration.
-  if (user) {
-    const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
-    user.resetToken = crypto.createHash('sha256').update(otp).digest('hex');
-    user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
-    await user.save();
-    const { subject, html } = passwordOtpEmail(otp);
-    await sendMail({ to: user.email, type: 'auth', subject, html });
-  }
-  res.json({ message: 'If that email exists, a verification code has been sent.' });
+  // We surface "no account" explicitly so users aren't left waiting for an email
+  // that will never arrive (deliberate trade-off against account enumeration).
+  if (!user) throw new ApiError(404, 'No account found with this email address.');
+  const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+  user.resetToken = crypto.createHash('sha256').update(otp).digest('hex');
+  user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
+  await user.save();
+  const { subject, html } = passwordOtpEmail(otp);
+  await sendMail({ to: user.email, type: 'auth', subject, html });
+  res.json({ message: 'A verification code has been sent to your email.' });
 });
 
 // Verifies the OTP / setup code and sets the password. Logs the user in on success.

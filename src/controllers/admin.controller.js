@@ -6,28 +6,61 @@ import StatusHistory from '../models/StatusHistory.js';
 import { STATUS, STATUS_TRANSITIONS } from '../utils/constants.js';
 import { asyncHandler, ApiError } from '../utils/asyncHandler.js';
 import { sendMail } from '../services/email.service.js';
-import { statusEmail } from '../services/templates.js';
+import { statusEmail, partnerStatusEmail } from '../services/templates.js';
 import { shareApplicationToLender } from '../services/share.service.js';
 import { logActivity } from '../services/activity.service.js';
 
-// GET /api/admin/applications?status=&q=&from=&to=
+// GET /api/admin/applications?status=&q=&from=&to=&loanType=&sort=&page=&limit=
+// Two modes:
+//   • no `page`  → legacy: up to 200 docs, no metadata (dashboard, notifications).
+//   • with `page` → paginated: { applications, total, page, pageSize, statusCounts, loanTypes }.
+// `statusCounts` and `loanTypes` are faceted over the filter WITHOUT the status
+// constraint, so the status pills/dropdown stay accurate while a status is selected.
 export const listApplications = asyncHandler(async (req, res) => {
-  const { status, q, from, to } = req.query;
-  const filter = {};
-  if (status) filter.status = status;
+  const { status, q, from, to, loanType, sort, page } = req.query;
+
+  const baseFilter = {};
   if (from || to) {
-    filter.createdAt = {};
-    if (from) filter.createdAt.$gte = new Date(from);
-    if (to) filter.createdAt.$lte = new Date(`${to}T23:59:59.999Z`);
+    baseFilter.createdAt = {};
+    if (from) baseFilter.createdAt.$gte = new Date(from);
+    if (to) baseFilter.createdAt.$lte = new Date(`${to}T23:59:59.999Z`);
   }
+  if (loanType) baseFilter.loanType = loanType;
   if (q) {
     const rx = new RegExp(q.trim(), 'i');
     const or = [{ fullName: rx }, { email: rx }];
     if (/^[0-9a-fA-F]{24}$/.test(q.trim())) or.push({ _id: q.trim() });
-    filter.$or = or;
+    baseFilter.$or = or;
   }
-  const applications = await Application.find(filter).sort({ createdAt: -1 }).limit(200);
-  res.json({ applications });
+
+  const sortMap = {
+    newest: { createdAt: -1 }, oldest: { createdAt: 1 },
+    amount_high: { amountRequested: -1 }, amount_low: { amountRequested: 1 },
+    name: { fullName: 1 },
+  };
+  const sortBy = sortMap[sort] || sortMap.newest;
+  const filter = status ? { ...baseFilter, status } : baseFilter;
+
+  // Legacy, non-paginated mode.
+  if (page === undefined) {
+    const applications = await Application.find(filter).sort(sortBy).limit(200);
+    return res.json({ applications });
+  }
+
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const pageSize = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 25));
+
+  const [applications, total, statusAgg, loanTypes] = await Promise.all([
+    Application.find(filter).sort(sortBy).skip((pageNum - 1) * pageSize).limit(pageSize),
+    Application.countDocuments(filter),
+    Application.aggregate([{ $match: baseFilter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    Application.distinct('loanType', baseFilter),
+  ]);
+
+  const statusCounts = {};
+  statusAgg.forEach((s) => { statusCounts[s._id] = s.count; });
+
+  res.json({ applications, total, page: pageNum, pageSize, statusCounts, loanTypes: loanTypes.sort() });
 });
 
 // GET /api/admin/applications/:id
@@ -46,6 +79,9 @@ export const getApplication = asyncHandler(async (req, res) => {
 // PATCH /api/admin/applications/:id/status  { toStatus, remarks }
 export const updateStatus = asyncHandler(async (req, res) => {
   const { toStatus, remarks } = req.body;
+  if (toStatus === STATUS.REJECTED && !String(remarks || '').trim()) {
+    throw new ApiError(400, 'A reason is required to reject an application');
+  }
   const app = await Application.findById(req.params.id);
   if (!app) throw new ApiError(404, 'Application not found');
 
@@ -101,7 +137,29 @@ export const shareToLender = asyncHandler(async (req, res) => {
 });
 
 // ---- Lender applications (from the public "Become a Lender" form) ----
-const LENDER_STATUSES = ['new', 'reviewing', 'onboarded', 'declined'];
+const LENDER_STATUSES = ['new', 'reviewing', 'onboarded', 'declined', 'blocked'];
+// Valid starting statuses when an admin manually adds a lender. Declined/blocked
+// are only reachable later via the pipeline, never at creation.
+const LENDER_CREATE_STATUSES = ['new', 'reviewing', 'onboarded'];
+
+// Allowed status transitions — the pipeline is rigid: an application moves
+// forward new → reviewing → onboarded and cannot skip a stage or move back.
+// Decline (from new/reviewing) and block (from any active stage) are side-exits,
+// each with a single recovery path back to "reviewing".
+const LENDER_TRANSITIONS = {
+  new: ['reviewing', 'declined', 'blocked'],
+  reviewing: ['onboarded', 'declined', 'blocked'],
+  onboarded: ['blocked'],
+  declined: ['reviewing'],
+  blocked: ['reviewing'],
+};
+
+// Fields an admin may edit on a lender via PATCH.
+const LENDER_EDITABLE = [
+  'institutionName', 'institutionType', 'website', 'license', 'yearEstablished',
+  'contactName', 'designation', 'email', 'phone', 'city', 'state',
+  'ticketSizeFrom', 'geographies', 'message', 'products',
+];
 
 export const listLenderApplications = asyncHandler(async (req, res) => {
   const { status, q } = req.query;
@@ -130,7 +188,7 @@ export const createLender = asyncHandler(async (req, res) => {
     designation, email: String(email).toLowerCase(), phone, city, state,
     products: Array.isArray(products) ? products : (products ? [products] : []),
     ticketSizeFrom, geographies, message,
-    status: LENDER_STATUSES.includes(status) ? status : 'onboarded',
+    status: LENDER_CREATE_STATUSES.includes(status) ? status : 'onboarded',
   });
   await logActivity({ actorUserId: req.user._id, action: 'lender.create', targetType: 'LenderApplication', targetId: lender._id });
   res.status(201).json({ lender });
@@ -142,26 +200,65 @@ export const getLenderApplication = asyncHandler(async (req, res) => {
   res.json({ lender });
 });
 
+// PATCH /api/admin/lender-applications/:id
+// Handles both a status change (rigidly validated against the pipeline) and
+// editing of lender details. Either or both may be present in the body.
 export const updateLenderApplication = asyncHandler(async (req, res) => {
-  const { status } = req.body;
-  if (!LENDER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
-  const lender = await LenderApplication.findByIdAndUpdate(req.params.id, { status }, { new: true });
+  const lender = await LenderApplication.findById(req.params.id);
   if (!lender) throw new ApiError(404, 'Lender application not found');
-  await logActivity({ actorUserId: req.user._id, action: 'lender.status', targetType: 'LenderApplication', targetId: lender._id, meta: { status } });
+
+  const { status } = req.body;
+  let statusChanged = false;
+  if (status !== undefined && status !== lender.status) {
+    if (!LENDER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
+    const allowed = LENDER_TRANSITIONS[lender.status] || [];
+    if (!allowed.includes(status)) {
+      throw new ApiError(400, `Cannot change status from "${lender.status}" to "${status}".`);
+    }
+    lender.status = status;
+    statusChanged = true;
+    await logActivity({ actorUserId: req.user._id, action: 'lender.status', targetType: 'LenderApplication', targetId: lender._id, meta: { status } });
+  }
+
+  let edited = false;
+  for (const k of LENDER_EDITABLE) {
+    if (req.body[k] === undefined) continue;
+    if (k === 'products') lender.products = Array.isArray(req.body[k]) ? req.body[k] : (req.body[k] ? [req.body[k]] : []);
+    else if (k === 'email') lender.email = String(req.body[k]).toLowerCase();
+    else lender[k] = req.body[k];
+    edited = true;
+  }
+  if (edited) await logActivity({ actorUserId: req.user._id, action: 'lender.edit', targetType: 'LenderApplication', targetId: lender._id });
+
+  await lender.save();
+  if (statusChanged) {
+    const { subject, html } = partnerStatusEmail({ name: lender.contactName || lender.institutionName, role: 'lender', status: lender.status });
+    await sendMail({ to: lender.email, subject, html, type: 'lender' });
+  }
   res.json({ lender });
 });
 
 export const deleteLender = asyncHandler(async (req, res) => {
   const lender = await LenderApplication.findByIdAndDelete(req.params.id);
   if (!lender) throw new ApiError(404, 'Lender not found');
-  // Un-assign from any applications that were shared with this lender.
+  // Un-assign from any applications that were shared with this lender, and pull the
+  // lender out of every application's sharedLenderIds so no dangling reference is left
+  // behind (a stale ref populates as null and breaks the application detail view).
   await Application.updateMany({ assignedLenderId: lender._id }, { $unset: { assignedLenderId: '' } });
+  await Application.updateMany({ sharedLenderIds: lender._id }, { $pull: { sharedLenderIds: lender._id } });
   await logActivity({ actorUserId: req.user._id, action: 'lender.delete', targetType: 'LenderApplication', targetId: lender._id });
   res.json({ message: 'Lender deleted' });
 });
 
 // ---- Referrer / DSA applications (from the public "Refer & Earn" form) ----
-const REFERRER_STATUSES = ['new', 'reviewing', 'onboarded', 'declined'];
+// Referrers reuse the exact same status pipeline as lenders.
+const REFERRER_STATUSES = LENDER_STATUSES;
+const REFERRER_CREATE_STATUSES = LENDER_CREATE_STATUSES;
+const REFERRER_TRANSITIONS = LENDER_TRANSITIONS;
+const REFERRER_EDITABLE = [
+  'fullName', 'referrerType', 'firmName', 'email', 'phone', 'city', 'state',
+  'pan', 'experience', 'monthlyVolume', 'message', 'products',
+];
 
 export const listReferrerApplications = asyncHandler(async (req, res) => {
   const { status, q } = req.query;
@@ -184,7 +281,7 @@ export const createReferrer = asyncHandler(async (req, res) => {
     pan, experience, monthlyVolume,
     products: Array.isArray(products) ? products : (products ? [products] : []),
     message,
-    status: REFERRER_STATUSES.includes(status) ? status : 'onboarded',
+    status: REFERRER_CREATE_STATUSES.includes(status) ? status : 'onboarded',
   });
   await logActivity({ actorUserId: req.user._id, action: 'referrer.create', targetType: 'ReferrerApplication', targetId: referrer._id });
   res.status(201).json({ referrer });
@@ -196,12 +293,41 @@ export const getReferrerApplication = asyncHandler(async (req, res) => {
   res.json({ referrer });
 });
 
+// PATCH /api/admin/referrer-applications/:id
+// Mirrors the lender handler: a status change is rigidly validated against the same
+// pipeline, and lender-style detail editing is supported. Either or both may be present.
 export const updateReferrerApplication = asyncHandler(async (req, res) => {
-  const { status } = req.body;
-  if (!REFERRER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
-  const referrer = await ReferrerApplication.findByIdAndUpdate(req.params.id, { status }, { new: true });
+  const referrer = await ReferrerApplication.findById(req.params.id);
   if (!referrer) throw new ApiError(404, 'Referrer application not found');
-  await logActivity({ actorUserId: req.user._id, action: 'referrer.status', targetType: 'ReferrerApplication', targetId: referrer._id, meta: { status } });
+
+  const { status } = req.body;
+  let statusChanged = false;
+  if (status !== undefined && status !== referrer.status) {
+    if (!REFERRER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
+    const allowed = REFERRER_TRANSITIONS[referrer.status] || [];
+    if (!allowed.includes(status)) {
+      throw new ApiError(400, `Cannot change status from "${referrer.status}" to "${status}".`);
+    }
+    referrer.status = status;
+    statusChanged = true;
+    await logActivity({ actorUserId: req.user._id, action: 'referrer.status', targetType: 'ReferrerApplication', targetId: referrer._id, meta: { status } });
+  }
+
+  let edited = false;
+  for (const k of REFERRER_EDITABLE) {
+    if (req.body[k] === undefined) continue;
+    if (k === 'products') referrer.products = Array.isArray(req.body[k]) ? req.body[k] : (req.body[k] ? [req.body[k]] : []);
+    else if (k === 'email') referrer.email = String(req.body[k]).toLowerCase();
+    else referrer[k] = req.body[k];
+    edited = true;
+  }
+  if (edited) await logActivity({ actorUserId: req.user._id, action: 'referrer.edit', targetType: 'ReferrerApplication', targetId: referrer._id });
+
+  await referrer.save();
+  if (statusChanged) {
+    const { subject, html } = partnerStatusEmail({ name: referrer.fullName, role: 'referrer', status: referrer.status });
+    await sendMail({ to: referrer.email, subject, html, type: 'referrer' });
+  }
   res.json({ referrer });
 });
 

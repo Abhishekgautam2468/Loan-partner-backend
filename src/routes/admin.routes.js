@@ -49,7 +49,7 @@ router.post(
 router.get('/lender-applications/:id', admin.getLenderApplication);
 router.patch(
   '/lender-applications/:id',
-  [body('status').notEmpty().withMessage('status is required')],
+  [body('status').optional({ checkFalsy: true }).isString().withMessage('status must be a string')],
   validate,
   admin.updateLenderApplication
 );
@@ -70,7 +70,7 @@ router.post(
 router.get('/referrer-applications/:id', admin.getReferrerApplication);
 router.patch(
   '/referrer-applications/:id',
-  [body('status').notEmpty().withMessage('status is required')],
+  [body('status').optional({ checkFalsy: true }).isString().withMessage('status must be a string')],
   validate,
   admin.updateReferrerApplication
 );

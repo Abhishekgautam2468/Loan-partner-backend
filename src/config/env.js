@@ -10,7 +10,7 @@ const env = {
   nodeEnv: P('NODE_ENV', 'development'),
   mongoUri: P('MONGODB_URI', 'mongodb://127.0.0.1:27017/triopaisa_loan_dms'),
   jwtSecret: P('JWT_SECRET', 'dev-insecure-secret-change-me'),
-  jwtExpiresIn: P('JWT_EXPIRES_IN', '7d'),
+  jwtExpiresIn: P('JWT_EXPIRES_IN', '45m'),
   clientOrigin: P('CLIENT_ORIGIN', 'http://localhost:5173'),
   smtp: {
     host: P('SMTP_HOST'),

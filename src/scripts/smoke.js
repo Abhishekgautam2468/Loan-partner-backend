@@ -132,6 +132,8 @@ await step('admin lists, opens & updates lender application', async () => {
   const lid = list.lenders[0]._id;
   const detail = await j(await fetch(`${base}/admin/lender-applications/${lid}`, { headers: A() }));
   expect(detail.lender && detail.lender.institutionName, 'lender detail missing');
+  // Pipeline is rigid: new → reviewing → onboarded.
+  await fetch(`${base}/admin/lender-applications/${lid}`, { method: 'PATCH', headers: A(), body: JSON.stringify({ status: 'reviewing' }) });
   const upd = await fetch(`${base}/admin/lender-applications/${lid}`, { method: 'PATCH', headers: A(), body: JSON.stringify({ status: 'onboarded' }) });
   const ud = await j(upd); expect(upd.status === 200 && ud.lender.status === 'onboarded', `update failed (${upd.status})`);
   onboardedLenderId = lid;
@@ -151,6 +153,8 @@ await step('admin lists, opens, updates & deletes referrer', async () => {
   const rid = list.referrers[0]._id;
   const detail = await j(await fetch(`${base}/admin/referrer-applications/${rid}`, { headers: A() }));
   expect(detail.referrer && detail.referrer.fullName, 'referrer detail missing');
+  // Pipeline is rigid: new → reviewing → onboarded.
+  await fetch(`${base}/admin/referrer-applications/${rid}`, { method: 'PATCH', headers: A(), body: JSON.stringify({ status: 'reviewing' }) });
   const upd = await fetch(`${base}/admin/referrer-applications/${rid}`, { method: 'PATCH', headers: A(), body: JSON.stringify({ status: 'onboarded' }) });
   const ud = await j(upd); expect(upd.status === 200 && ud.referrer.status === 'onboarded', `update failed (${upd.status})`);
   const created = await j(await fetch(`${base}/admin/referrer-applications`, { method: 'POST', headers: A(), body: JSON.stringify({ fullName: 'Manual DSA', referrerType: 'Consultant', email: 'm@dsa.com', phone: '5555555555' }) }));
@@ -194,6 +198,41 @@ await step('duplicate pending category blocked (409)', async () => {
   const fd = new FormData();
   Object.entries({ fullName: 'Asha Rao', phone: '9999999999', email: 'asha@example.com', aadhaarNumber: '123456789012', panNumber: 'ABCDE1234F', loanType: 'Personal Loan', amountRequested: '700000' }).forEach(([k, v]) => fd.append(k, v));
   const r = await fetch(`${base}/applications`, { method: 'POST', headers: { Authorization: `Bearer ${custToken}` }, body: fd });
+  expect(r.status === 409, `expected 409 got ${r.status}`);
+});
+
+await step('SCF: /meta excludes SCF products', async () => {
+  const d = await j(await fetch(`${base}/meta`));
+  expect(!d.loanTypes.includes('Dealer Finance'), 'meta should not expose SCF products');
+});
+
+await step('SCF: public submit creates application + account', async () => {
+  const fd = new FormData();
+  const details = JSON.stringify({
+    scf: true,
+    business: { companyName: 'Trade Co', gstNumber: '27ABCDE1234F1Z5', industry: 'Auto' },
+    funding: { amountRequested: '2500000', tenureMonths: '3' },
+    productDetails: { anchorBrand: 'BrandX', requiredFunding: '2500000' },
+  });
+  Object.entries({ fullName: 'SCF Owner', phone: '9090909090', email: 'scfco@example.com', aadhaarNumber: '111122223333', panNumber: 'PQRST5678U', loanType: 'Dealer Finance', amountRequested: '2500000', tenureMonths: '3', details }).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(`${base}/public/applications`, { method: 'POST', body: fd });
+  const d = await j(r);
+  expect(r.status === 201 && d.application?._id, `status ${r.status}`);
+  expect(d.account?.setupToken, 'no setup token');
+});
+
+await step('SCF: admin sees the SCF application with scf details', async () => {
+  const list = await j(await fetch(`${base}/admin/applications?q=SCF Owner`, { headers: A() }));
+  expect(list.applications.length === 1 && list.applications[0].loanType === 'Dealer Finance', `found ${list.applications.length}`);
+  const detail = await j(await fetch(`${base}/admin/applications/${list.applications[0]._id}`, { headers: A() }));
+  expect(detail.application?.details?.scf === true, 'scf flag missing on detail');
+});
+
+await step('PAN uniqueness: different email + in-use PAN blocked (409)', async () => {
+  // ABCDE1234F is already bound to asha's account; a different email must be rejected.
+  const fd = new FormData();
+  Object.entries({ fullName: 'Intruder', phone: '9000000000', email: 'intruder@example.com', aadhaarNumber: '444455556666', panNumber: 'ABCDE1234F', loanType: 'Gold Loan', amountRequested: '100000' }).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(`${base}/public/applications`, { method: 'POST', body: fd });
   expect(r.status === 409, `expected 409 got ${r.status}`);
 });
 

@@ -22,7 +22,7 @@ const lenderApplicationSchema = new mongoose.Schema(
     geographies: { type: String, trim: true },
     message: { type: String, trim: true },
 
-    status: { type: String, enum: ['new', 'reviewing', 'onboarded', 'declined'], default: 'new', index: true },
+    status: { type: String, enum: ['new', 'reviewing', 'onboarded', 'declined', 'blocked'], default: 'new', index: true },
   },
   { timestamps: true }
 );

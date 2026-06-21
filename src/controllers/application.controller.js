@@ -17,6 +17,45 @@ function safeParse(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+// A PAN may belong to exactly one customer account. Block any submit that would
+// attach a PAN already registered to a different account.
+async function assertPanOwnership(pan, { reqUser, email }) {
+  const byPan = await User.findOne({ panNumber: pan });
+  if (reqUser) {
+    if (byPan && !byPan._id.equals(reqUser._id)) {
+      throw new ApiError(409, 'This PAN is already registered to another account.');
+    }
+    if (reqUser.panNumber && reqUser.panNumber !== pan) {
+      throw new ApiError(409, 'Your account is registered with a different PAN.');
+    }
+  } else if (byPan && byPan.email !== email) {
+    throw new ApiError(409, 'This PAN is already registered to another account. Please log in to continue.');
+  }
+}
+
+// Bind a PAN to an account, enforcing one-PAN-per-account. Idempotent. This must
+// NEVER fail silently: an unbound panNumber breaks the "this PAN already has an
+// account" detection on the apply form, so conflicts and write errors are surfaced.
+async function ensurePanBound(user, panNumber) {
+  if (!user) return;
+  const pan = String(panNumber || '').toUpperCase().trim();
+  if (!pan) throw new ApiError(400, 'A PAN is required to bind to the account.');
+  if (user.panNumber === pan) return; // already bound — nothing to do
+  if (user.panNumber && user.panNumber !== pan) {
+    throw new ApiError(409, 'Your account is registered with a different PAN.');
+  }
+  const holder = await User.findOne({ panNumber: pan, _id: { $ne: user._id } }).select('_id');
+  if (holder) throw new ApiError(409, 'This PAN is already registered to another account.');
+  user.panNumber = pan;
+  try {
+    await user.save();
+  } catch (err) {
+    if (err.code === 11000) throw new ApiError(409, 'This PAN is already registered to another account.');
+    console.error('[pan-bind] failed to bind PAN', { userId: user._id?.toString(), pan, error: err.message });
+    throw err; // surface — do not swallow
+  }
+}
+
 // POST /api/applications  (customer; multipart with `documents` files)
 // Shared submission logic. `customerId` is null for public (no-login) submissions.
 // Statuses that count as "in progress" (not yet decided).
@@ -25,6 +64,10 @@ const PENDING_STATUSES = [STATUS.SUBMITTED, STATUS.UNDER_REVIEW, STATUS.DOCUMENT
 async function submitApplication(req, { customerId }) {
   const { fullName, phone, email, aadhaarNumber, panNumber, loanType, amountRequested, purpose, tenureMonths } = req.body;
   const pan = String(panNumber).toUpperCase();
+  const emailLc = String(email).toLowerCase();
+
+  // A PAN belongs to exactly one account — reject before creating anything.
+  await assertPanOwnership(pan, { reqUser: req.user, email: emailLc });
 
   // One application per category at a time: block if a non-decided one already exists for this PAN.
   const inProgress = await Application.findOne({ panNumber: pan, loanType, status: { $in: PENDING_STATUSES } });
@@ -41,7 +84,7 @@ async function submitApplication(req, { customerId }) {
     customerId: customerId || undefined,
     fullName,
     phone,
-    email: email.toLowerCase(),
+    email: emailLc,
     aadhaarNumber,
     panNumber: pan,
     loanType,
@@ -51,6 +94,10 @@ async function submitApplication(req, { customerId }) {
     details,
     status: STATUS.SUBMITTED,
   });
+
+  // Bind the PAN to a logged-in customer's account. (Public submits bind it via
+  // linkOrCreateAccount.) Idempotent and never silent — throws on conflict.
+  if (req.user) await ensurePanBound(req.user, pan);
 
   // Upload each file to Cloudinary (private) and persist Document rows.
   const files = req.files || [];
@@ -114,13 +161,16 @@ async function linkOrCreateAccount(app) {
     await user.setPassword(crypto.randomBytes(24).toString('hex')); // placeholder, unusable until set
     await user.save();
   }
+  // Bind the PAN to the account (creates or backfills). Idempotent; throws on a
+  // genuine conflict rather than leaving the account without a PAN.
+  await ensurePanBound(user, app.panNumber);
   // Associate this and any prior unlinked applications for this email.
   await Application.updateMany({ email: app.email, customerId: null }, { customerId: user._id });
 
   if (!user.passwordSet) {
     const setupToken = crypto.randomBytes(32).toString('hex');
     user.resetToken = crypto.createHash('sha256').update(setupToken).digest('hex');
-    user.resetTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+    user.resetTokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
     await user.save();
     return { email: user.email, exists: false, setupToken };
   }
@@ -132,10 +182,35 @@ async function linkOrCreateAccount(app) {
 // so the form can warn early instead of failing at submit.
 export const applicationPrecheck = asyncHandler(async (req, res) => {
   const pan = String(req.body.panNumber || '').toUpperCase().trim();
+  const email = String(req.body.email || '').toLowerCase().trim();
   const { loanType } = req.body;
-  if (!pan || !loanType) return res.json({ pending: false });
-  const existing = await Application.findOne({ panNumber: pan, loanType, status: { $in: PENDING_STATUSES } }).select('_id');
-  res.json({ pending: !!existing });
+
+  // Duplicate in-progress application for this PAN + product.
+  let pending = false;
+  if (pan && loanType) {
+    const existing = await Application.findOne({ panNumber: pan, loanType, status: { $in: PENDING_STATUSES } }).select('_id');
+    pending = !!existing;
+  }
+
+  // An existing account linked to this PAN or email (each maps to a single account).
+  // We return the account email so the login page can pre-fill it.
+  const or = [];
+  if (pan) or.push({ panNumber: pan });
+  if (email) or.push({ email });
+  let account = or.length ? await User.findOne({ $or: or }).select('email') : null;
+
+  // User.panNumber isn't reliably populated, so matching a PAN to a User directly
+  // often fails. The canonical owner of a PAN is whoever owns an application carrying
+  // it — resolve the account through that application so a returning applicant is
+  // detected even when they enter a different email than their account's.
+  if (!account && pan) {
+    const ownedApp = await Application.findOne({ panNumber: pan, customerId: { $ne: null } })
+      .select('customerId')
+      .populate('customerId', 'email');
+    if (ownedApp?.customerId) account = ownedApp.customerId;
+  }
+
+  res.json({ pending, accountExists: !!account, accountEmail: account?.email || null });
 });
 
 // POST /api/public/applications  (no auth — website "Apply Now" lead form)
