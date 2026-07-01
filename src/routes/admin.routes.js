@@ -7,6 +7,7 @@ import { ROLES, STATUS_LIST } from '../utils/constants.js';
 import * as auth from '../controllers/auth.controller.js';
 import * as admin from '../controllers/admin.controller.js';
 import * as docCtrl from '../controllers/document.controller.js';
+import { uploadDocuments } from '../middleware/upload.js';
 
 const router = Router();
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
@@ -19,6 +20,10 @@ router.use(requireAuth, requireRole(ROLES.ADMIN));
 
 router.get('/stats', admin.stats);
 
+// Distinct RM names already used — powers the RM combobox/datalist. Declared before
+// the '/applications/:id' param route so the path isn't captured as an id.
+router.get('/rm-names', admin.listRmNames);
+
 router.get('/applications', admin.listApplications);
 router.get('/applications/:id', admin.getApplication);
 router.patch(
@@ -27,10 +32,17 @@ router.patch(
   validate,
   admin.updateStatus
 );
+router.patch(
+  '/applications/:id/assign-rm',
+  [body('rmName').optional({ checkFalsy: true }).isString().withMessage('rmName must be a string')],
+  validate,
+  admin.assignRm
+);
+// Share to one or more lenders. Multipart: lenderIds[] + documentIds[] (existing
+// docs to attach) + any newly uploaded `documents` files.
 router.post(
   '/applications/:id/share-to-lender',
-  [body('lenderId').notEmpty().withMessage('lenderId is required')],
-  validate,
+  uploadDocuments,
   admin.shareToLender
 );
 

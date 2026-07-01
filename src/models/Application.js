@@ -9,10 +9,16 @@ const applicationSchema = new mongoose.Schema(
     fullName: { type: String, required: true, trim: true },
     phone: { type: String, required: true, trim: true },
     email: { type: String, required: true, lowercase: true, trim: true },
-    aadhaarNumber: { type: String, required: true, match: /^\d{12}$/ },
+    // Optional: some products (e.g. Purchase Invoice Discounting) don't collect Aadhaar.
+    // When provided it must be 12 digits.
+    aadhaarNumber: { type: String, match: /^\d{12}$/ },
     panNumber: { type: String, required: true, uppercase: true, match: /^[A-Z]{5}[0-9]{4}[A-Z]$/ },
     loanType: { type: String, required: true, enum: ALL_LOAN_TYPES },
     amountRequested: { type: Number, required: true, min: 0 },
+    // Set by an admin at approval time.
+    approvedAmount: { type: Number, min: 0 },
+    // Relationship Manager handling this proposal (set by admin during review).
+    rmName: { type: String, trim: true },
     tenureMonths: { type: Number, min: 0 },
     purpose: { type: String, trim: true },
     // Extended KYC / eligibility data captured by the multi-step application form.
@@ -23,6 +29,7 @@ const applicationSchema = new mongoose.Schema(
     assignedManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Manager' }, // legacy
     assignedLenderId: { type: mongoose.Schema.Types.ObjectId, ref: 'LenderApplication' }, // most recent
     sharedLenderIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LenderApplication' }], // all lenders shared with
+    sharedDocumentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Document' }], // docs a shared lender may view in the portal
     forwardedAt: { type: Date },
     sharedToManagerAt: { type: Date },
     rejectionReason: { type: String, trim: true },

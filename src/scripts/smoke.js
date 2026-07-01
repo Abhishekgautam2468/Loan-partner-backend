@@ -14,6 +14,7 @@ const { connectDB } = await import('../config/db.js');
 const { default: app } = await import('../app.js');
 const { default: User } = await import('../models/User.js');
 const { ROLES } = await import('../utils/constants.js');
+const { signToken } = await import('../utils/jwt.js');
 
 await connectDB();
 
@@ -42,7 +43,7 @@ await step('GET /health', async () => {
 
 await step('GET /meta returns the loan types', async () => {
   const d = await j(await fetch(`${base}/meta`));
-  expect(d.loanTypes.length >= 7 && d.loanTypes.includes('Personal Loan'), `got ${d.loanTypes.length}`);
+  expect(d.loanTypes.length >= 7 && d.loanTypes.includes('Equipment Finance'), `got ${d.loanTypes.length}`);
 });
 
 await step('register customer', async () => {
@@ -66,7 +67,7 @@ await step('create application (valid)', async () => {
 
 await step('public application (no login)', async () => {
   const fd = new FormData();
-  const fields = { fullName: 'Walk In', phone: '8888888888', email: 'walkin@example.com', aadhaarNumber: '210987654321', panNumber: 'ZYXWV9876K', loanType: 'Home Loan', amountRequested: '2500000', tenureMonths: '120', details: JSON.stringify({ employmentType: 'Salaried', financial: { bankName: 'HDFC' } }) };
+  const fields = { fullName: 'Walk In', phone: '8888888888', email: 'walkin@example.com', aadhaarNumber: '210987654321', panNumber: 'ZYXWV9876K', loanType: 'Personal Loan', amountRequested: '2500000', tenureMonths: '120', details: JSON.stringify({ employmentType: 'Salaried', financial: { bankName: 'HDFC' } }) };
   Object.entries(fields).forEach(([k, v]) => fd.append(k, v));
   const r = await fetch(`${base}/public/applications`, { method: 'POST', body: fd });
   const d = await j(r);
@@ -88,7 +89,7 @@ await step('login with the new password', async () => {
 await step('walk-in account sees its linked application', async () => {
   const login = await j(await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: setupEmail, password: 'WalkIn@123' }) }));
   const d = await j(await fetch(`${base}/applications/mine`, { headers: { Authorization: `Bearer ${login.token}` } }));
-  expect(d.applications.length === 1 && d.applications[0].loanType === 'Home Loan', `linked ${d.applications.length}`);
+  expect(d.applications.length === 1 && d.applications[0].loanType === 'Personal Loan', `linked ${d.applications.length}`);
 });
 
 await step('forgot-password responds 200 (OTP emailed)', async () => {
@@ -170,19 +171,75 @@ await step('illegal transition blocked (Submitted→Approved)', async () => {
 
 for (const s of ['Under Review', 'Documents Verified', 'Approved']) {
   await step(`transition → ${s}`, async () => {
-    const r = await fetch(`${base}/admin/applications/${appId}/status`, { method: 'PATCH', headers: A(), body: JSON.stringify({ toStatus: s }) });
+    // Approving requires an approved amount.
+    const body = s === 'Approved' ? { toStatus: s, approvedAmount: 450000 } : { toStatus: s };
+    const r = await fetch(`${base}/admin/applications/${appId}/status`, { method: 'PATCH', headers: A(), body: JSON.stringify(body) });
     expect(r.status === 200, `status ${r.status}`);
   });
 }
+
+await step('approve requires an approved amount', async () => {
+  // A fresh application taken straight to approval without an amount must be rejected.
+  const fd = new FormData();
+  Object.entries({ fullName: 'No Amount', phone: '7777700000', email: 'noamount@example.com', aadhaarNumber: '987600001234', panNumber: 'NOAMT1234Z', loanType: 'Others', amountRequested: '300000' }).forEach(([k, v]) => fd.append(k, v));
+  const created = await j(await fetch(`${base}/public/applications`, { method: 'POST', body: fd }));
+  const nid = created.application._id;
+  for (const s of ['Under Review', 'Documents Verified']) {
+    await fetch(`${base}/admin/applications/${nid}/status`, { method: 'PATCH', headers: A(), body: JSON.stringify({ toStatus: s }) });
+  }
+  const r = await fetch(`${base}/admin/applications/${nid}/status`, { method: 'PATCH', headers: A(), body: JSON.stringify({ toStatus: 'Approved' }) });
+  expect(r.status === 400, `expected 400 got ${r.status}`);
+});
 
 await step('share approved app to onboarded lender (email dev-logged)', async () => {
   const r = await fetch(`${base}/admin/applications/${appId}/share-to-lender`, { method: 'POST', headers: A(), body: JSON.stringify({ lenderId: onboardedLenderId }) });
   const d = await j(r); expect(r.status === 200 && d.application.assignedLenderId, `status ${r.status}`);
 });
 
+await step('lender portal: request-code (shared email) → 200', async () => {
+  const r = await fetch(`${base}/lender/request-code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ applicationId: appId, email: 'riya@acme.com' }) });
+  expect(r.status === 200, `status ${r.status}`);
+});
+
+await step('lender portal: verify-code wrong code → 400', async () => {
+  const r = await fetch(`${base}/lender/verify-code`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ applicationId: appId, email: 'riya@acme.com', code: '000000' }) });
+  expect(r.status === 400, `status ${r.status}`);
+});
+
+await step('lender portal: view application with a valid lender token', async () => {
+  const token = signToken({ scope: 'lender', lenderId: String(onboardedLenderId), email: 'riya@acme.com', applicationId: String(appId) }, { expiresIn: '2h' });
+  const d = await j(await fetch(`${base}/lender/applications/${appId}`, { headers: { Authorization: `Bearer ${token}` } }));
+  expect(d.application && String(d.application._id) === String(appId) && Array.isArray(d.documents), 'lender view payload wrong');
+});
+
+await step('lender portal: token for another application → 403', async () => {
+  const token = signToken({ scope: 'lender', lenderId: String(onboardedLenderId), email: 'riya@acme.com', applicationId: String(appId) }, { expiresIn: '2h' });
+  // onboardedLenderId is a valid ObjectId that is NOT appId → scope mismatch.
+  const r = await fetch(`${base}/lender/applications/${onboardedLenderId}`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(r.status === 403, `status ${r.status}`);
+});
+
+await step('lender portal: no token → 401', async () => {
+  const r = await fetch(`${base}/lender/applications/${appId}`);
+  expect(r.status === 401, `status ${r.status}`);
+});
+
 await step('stats reflect 1 approved', async () => {
   const d = await j(await fetch(`${base}/admin/stats`, { headers: A() }));
   expect(d.counts.approved === 1 && d.counts.assigned === 1, JSON.stringify(d.counts));
+});
+
+await step('assign RM + filter + rm-names', async () => {
+  const r = await fetch(`${base}/admin/applications/${appId}/assign-rm`, { method: 'PATCH', headers: A(), body: JSON.stringify({ rmName: 'Priya Sharma' }) });
+  const d = await j(r);
+  expect(r.status === 200 && d.application.rmName === 'Priya Sharma', `assign ${r.status}`);
+  const names = await j(await fetch(`${base}/admin/rm-names`, { headers: A() }));
+  expect(names.rmNames.includes('Priya Sharma'), 'rm-names should include the new RM');
+  const filtered = await j(await fetch(`${base}/admin/applications?rm=Priya`, { headers: A() }));
+  expect(filtered.applications.length === 1 && filtered.applications[0].rmName === 'Priya Sharma', `filter got ${filtered.applications.length}`);
+  // Case-insensitive: re-assigning a different casing canonicalizes to the existing spelling.
+  const lower = await j(await fetch(`${base}/admin/applications/${appId}/assign-rm`, { method: 'PATCH', headers: A(), body: JSON.stringify({ rmName: 'priya sharma' }) }));
+  expect(lower.application.rmName === 'Priya Sharma', `canonical ${lower.application.rmName}`);
 });
 
 await step('re-apply (decided category) with reuseDocumentsFrom', async () => {
@@ -201,9 +258,9 @@ await step('duplicate pending category blocked (409)', async () => {
   expect(r.status === 409, `expected 409 got ${r.status}`);
 });
 
-await step('SCF: /meta excludes SCF products', async () => {
+await step('SCF: /meta includes SCF products', async () => {
   const d = await j(await fetch(`${base}/meta`));
-  expect(!d.loanTypes.includes('Dealer Finance'), 'meta should not expose SCF products');
+  expect(d.loanTypes.includes('Dealer Finance'), 'meta should expose SCF products');
 });
 
 await step('SCF: public submit creates application + account', async () => {
@@ -231,7 +288,7 @@ await step('SCF: admin sees the SCF application with scf details', async () => {
 await step('PAN uniqueness: different email + in-use PAN blocked (409)', async () => {
   // ABCDE1234F is already bound to asha's account; a different email must be rejected.
   const fd = new FormData();
-  Object.entries({ fullName: 'Intruder', phone: '9000000000', email: 'intruder@example.com', aadhaarNumber: '444455556666', panNumber: 'ABCDE1234F', loanType: 'Gold Loan', amountRequested: '100000' }).forEach(([k, v]) => fd.append(k, v));
+  Object.entries({ fullName: 'Intruder', phone: '9000000000', email: 'intruder@example.com', aadhaarNumber: '444455556666', panNumber: 'ABCDE1234F', loanType: 'Personal Loan', amountRequested: '100000' }).forEach(([k, v]) => fd.append(k, v));
   const r = await fetch(`${base}/public/applications`, { method: 'POST', body: fd });
   expect(r.status === 409, `expected 409 got ${r.status}`);
 });

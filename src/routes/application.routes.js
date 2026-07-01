@@ -18,7 +18,7 @@ router.post(
     body('fullName').trim().notEmpty().withMessage('Full name is required'),
     body('phone').trim().notEmpty().withMessage('Phone is required'),
     body('email').isEmail().withMessage('Valid email required'),
-    body('aadhaarNumber').matches(AADHAAR_RE).withMessage('Aadhaar must be 12 digits'),
+    body('aadhaarNumber').optional({ checkFalsy: true }).matches(AADHAAR_RE).withMessage('Aadhaar must be 12 digits'),
     body('panNumber').customSanitizer((v) => String(v || '').toUpperCase()).matches(PAN_RE).withMessage('PAN must be in format ABCDE1234F'),
     body('loanType').isIn(ALL_LOAN_TYPES).withMessage('Invalid loan type'),
     body('amountRequested').isFloat({ min: 0 }).withMessage('Amount must be a positive number'),

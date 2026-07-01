@@ -23,6 +23,10 @@ const lenderApplicationSchema = new mongoose.Schema(
     message: { type: String, trim: true },
 
     status: { type: String, enum: ['new', 'reviewing', 'onboarded', 'declined', 'blocked'], default: 'new', index: true },
+
+    // Transient one-time code for secure portal access (sha256 hash + expiry).
+    accessOtp: { type: String },
+    accessOtpExpiry: { type: Date },
   },
   { timestamps: true }
 );

@@ -16,6 +16,7 @@ const env = {
   jwtSecret: P('JWT_SECRET', 'dev-insecure-secret-change-me'),
   jwtExpiresIn: P('JWT_EXPIRES_IN', '45m'),
   clientOrigin: P('CLIENT_ORIGIN', 'http://localhost:5173'),
+  contactEmail: P('CONTACT_EMAIL', 'contact@triopaisa.com'),
   smtp: {
     host: P('SMTP_HOST'),
     port: Number(P('SMTP_PORT', 587)),

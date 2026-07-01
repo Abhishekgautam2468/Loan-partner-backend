@@ -5,10 +5,21 @@ import ReferrerApplication from '../models/ReferrerApplication.js';
 import StatusHistory from '../models/StatusHistory.js';
 import { STATUS, STATUS_TRANSITIONS } from '../utils/constants.js';
 import { asyncHandler, ApiError } from '../utils/asyncHandler.js';
+import env from '../config/env.js';
 import { sendMail } from '../services/email.service.js';
-import { statusEmail, partnerStatusEmail } from '../services/templates.js';
-import { shareApplicationToLender } from '../services/share.service.js';
+import { statusEmail, partnerStatusEmail, lenderInviteEmail } from '../services/templates.js';
+import { uploadBuffer } from '../services/storage.service.js';
 import { logActivity } from '../services/activity.service.js';
+
+// Parse a value that may be a JSON array string, a single value, or already an array.
+function parseIdList(v) {
+  if (Array.isArray(v)) return v.filter(Boolean);
+  if (typeof v === 'string' && v.trim()) {
+    try { const p = JSON.parse(v); return (Array.isArray(p) ? p : [p]).filter(Boolean); }
+    catch { return [v]; }
+  }
+  return [];
+}
 
 // GET /api/admin/applications?status=&q=&from=&to=&loanType=&sort=&page=&limit=
 // Two modes:
@@ -17,9 +28,10 @@ import { logActivity } from '../services/activity.service.js';
 // `statusCounts` and `loanTypes` are faceted over the filter WITHOUT the status
 // constraint, so the status pills/dropdown stay accurate while a status is selected.
 export const listApplications = asyncHandler(async (req, res) => {
-  const { status, q, from, to, loanType, sort, page } = req.query;
+  const { status, q, from, to, loanType, rm, sort, page } = req.query;
 
   const baseFilter = {};
+  if (rm && rm.trim()) baseFilter.rmName = new RegExp(rm.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   if (from || to) {
     baseFilter.createdAt = {};
     if (from) baseFilter.createdAt.$gte = new Date(from);
@@ -78,9 +90,15 @@ export const getApplication = asyncHandler(async (req, res) => {
 
 // PATCH /api/admin/applications/:id/status  { toStatus, remarks }
 export const updateStatus = asyncHandler(async (req, res) => {
-  const { toStatus, remarks } = req.body;
+  const { toStatus, remarks, approvedAmount } = req.body;
   if (toStatus === STATUS.REJECTED && !String(remarks || '').trim()) {
     throw new ApiError(400, 'A reason is required to reject an application');
+  }
+  // The approved amount is mandatory when approving.
+  let approved;
+  if (toStatus === STATUS.APPROVED) {
+    approved = Number(approvedAmount);
+    if (!(approved > 0)) throw new ApiError(400, 'Enter the approved amount');
   }
   const app = await Application.findById(req.params.id);
   if (!app) throw new ApiError(404, 'Application not found');
@@ -94,6 +112,7 @@ export const updateStatus = asyncHandler(async (req, res) => {
   app.status = toStatus;
   if (toStatus === STATUS.FORWARDED_TO_MANAGER) app.forwardedAt = new Date();
   if (toStatus === STATUS.REJECTED) app.rejectionReason = remarks || '';
+  if (toStatus === STATUS.APPROVED) app.approvedAmount = approved;
   await app.save();
 
   await StatusHistory.create({ applicationId: app._id, fromStatus, toStatus, changedByUserId: req.user._id, remarks });
@@ -105,35 +124,120 @@ export const updateStatus = asyncHandler(async (req, res) => {
   res.json({ application: app });
 });
 
-// POST /api/admin/applications/:id/share-to-lender  { lenderId }
-// Available once documents are verified; can be sent to multiple lenders.
+// PATCH /api/admin/applications/:id/assign-rm  { rmName }
+// Records the Relationship Manager handling this proposal. Independent of status.
+export const assignRm = asyncHandler(async (req, res) => {
+  const app = await Application.findById(req.params.id);
+  if (!app) throw new ApiError(404, 'Application not found');
+  let name = String(req.body.rmName || '').trim();
+  // RM names are case-insensitive: if one already exists that matches ignoring case,
+  // reuse its spelling so "kavya" and "Kavya" don't become two separate RMs.
+  if (name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existing = await Application.findOne({ rmName: new RegExp(`^${escaped}$`, 'i') }).select('rmName');
+    if (existing?.rmName) name = existing.rmName;
+  }
+  app.rmName = name;
+  await app.save();
+  await logActivity({ actorUserId: req.user._id, action: 'application.assignRm', targetType: 'Application', targetId: app._id, meta: { rmName: app.rmName } });
+  res.json({ application: app });
+});
+
+// GET /api/admin/rm-names → { rmNames: [...] }
+// Distinct, non-empty RM names already assigned — powers the RM combobox.
+export const listRmNames = asyncHandler(async (req, res) => {
+  // Dedupe case-insensitively (keep the first spelling seen) so the combobox/filter
+  // never lists "Kavya" and "kavya" separately.
+  const seen = new Map();
+  for (const raw of await Application.distinct('rmName')) {
+    const t = (raw || '').trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (!seen.has(k)) seen.set(k, t);
+  }
+  const names = [...seen.values()].sort((a, b) => a.localeCompare(b));
+  res.json({ rmNames: names });
+});
+
+// POST /api/admin/applications/:id/share-to-lender
+// Multipart body: lenderIds (JSON array; legacy single `lenderId` also accepted),
+// documentIds (JSON array of existing Document ids to attach), and any newly
+// uploaded `documents` files. Emails each selected lender the application details
+// with the selected + uploaded documents as attachments.
 const SHAREABLE = [STATUS.DOCUMENTS_VERIFIED, STATUS.FORWARDED_TO_MANAGER, STATUS.APPROVED];
 export const shareToLender = asyncHandler(async (req, res) => {
-  const { lenderId } = req.body;
   const app = await Application.findById(req.params.id);
   if (!app) throw new ApiError(404, 'Application not found');
   if (!SHAREABLE.includes(app.status)) {
     throw new ApiError(400, 'Verify the documents before sharing this application to a lender');
   }
-  const lender = await LenderApplication.findById(lenderId);
-  if (!lender) throw new ApiError(404, 'Lender not found');
-  // Sharing a deal effectively onboards the lender.
-  if (lender.status !== 'onboarded') { lender.status = 'onboarded'; await lender.save(); }
 
-  const sent = await shareApplicationToLender(app, lender);
-  if (!app.sharedLenderIds.map(String).includes(String(lender._id))) app.sharedLenderIds.push(lender._id);
-  app.assignedLenderId = lender._id;
+  let lenderIds = parseIdList(req.body.lenderIds);
+  if (lenderIds.length === 0 && req.body.lenderId) lenderIds = [req.body.lenderId];
+  if (lenderIds.length === 0) throw new ApiError(400, 'Select at least one lender');
+
+  const lenders = await LenderApplication.find({ _id: { $in: lenderIds } });
+  if (lenders.length === 0) throw new ApiError(404, 'Lender not found');
+
+  // Existing documents the admin chose to attach (default: all, when none specified).
+  const docIds = parseIdList(req.body.documentIds);
+  const selectedDocs = await Document.find(
+    docIds.length ? { _id: { $in: docIds }, applicationId: app._id } : { applicationId: app._id }
+  );
+
+  // Persist any newly uploaded files as documents on this application (verified, so
+  // they read as admin-supplied), then attach them too.
+  const uploadedDocs = [];
+  for (const file of (req.files || [])) {
+    const result = await uploadBuffer(file);
+    const doc = await Document.create({
+      applicationId: app._id,
+      category: 'Additional (lender share)',
+      originalName: file.originalname,
+      cloudinaryPublicId: result.public_id,
+      cloudinaryUrl: result.secure_url,
+      resourceType: result.resource_type || 'raw',
+      mimeType: file.mimetype,
+      sizeBytes: file.size,
+      verificationStatus: 'verified',
+    });
+    uploadedDocs.push(doc);
+  }
+
+  // Record which documents shared lenders may view in the secure portal (union of
+  // the admin's selection + any uploads, across shares). Nothing is attached to email.
+  const sharedIds = new Set(app.sharedDocumentIds.map(String));
+  [...selectedDocs, ...uploadedDocs].forEach((d) => sharedIds.add(String(d._id)));
+  app.sharedDocumentIds = [...sharedIds];
+
+  const results = [];
+  for (const lender of lenders) {
+    // Sharing a deal effectively onboards the lender.
+    if (lender.status !== 'onboarded') { lender.status = 'onboarded'; await lender.save(); }
+    // Basic-info invite with a secure link — the lender verifies their email with a
+    // one-time code on the platform, then views details + documents there.
+    const link = `${env.clientOrigin}/lender/access/${app._id}`;
+    const { subject, html } = lenderInviteEmail(app, lender, link);
+    let sent = false;
+    try { sent = await sendMail({ to: lender.email, subject, html, type: 'lender-share', applicationId: app._id }); }
+    catch (err) { console.error('[share] email failed', lender.email, err.message); }
+    if (!app.sharedLenderIds.map(String).includes(String(lender._id))) app.sharedLenderIds.push(lender._id);
+    app.assignedLenderId = lender._id;
+    results.push({ lenderId: String(lender._id), institutionName: lender.institutionName, sent });
+  }
+
   app.sharedToManagerAt = new Date();
   // First share advances the workflow stage (Approve stays available afterwards).
   if (app.status === STATUS.DOCUMENTS_VERIFIED) {
     app.forwardedAt = new Date();
     app.status = STATUS.FORWARDED_TO_MANAGER;
-    await StatusHistory.create({ applicationId: app._id, fromStatus: STATUS.DOCUMENTS_VERIFIED, toStatus: STATUS.FORWARDED_TO_MANAGER, changedByUserId: req.user._id, remarks: `Shared with ${lender.institutionName}` });
+    await StatusHistory.create({ applicationId: app._id, fromStatus: STATUS.DOCUMENTS_VERIFIED, toStatus: STATUS.FORWARDED_TO_MANAGER, changedByUserId: req.user._id, remarks: `Shared with ${lenders.map((l) => l.institutionName).join(', ')}` });
   }
   await app.save();
-  await logActivity({ actorUserId: req.user._id, action: 'application.share', targetType: 'Application', targetId: app._id, meta: { lenderId, sent } });
+  await logActivity({ actorUserId: req.user._id, action: 'application.share', targetType: 'Application', targetId: app._id, meta: { lenderIds, sharedDocumentCount: app.sharedDocumentIds.length, results } });
 
-  res.json({ application: app, emailSent: sent });
+  const emailSent = results.some((r) => r.sent);
+  res.json({ application: app, results, emailSent });
 });
 
 // ---- Lender applications (from the public "Become a Lender" form) ----
