@@ -23,6 +23,8 @@ router.get('/stats', admin.stats);
 // Distinct RM names already used — powers the RM combobox/datalist. Declared before
 // the '/applications/:id' param route so the path isn't captured as an id.
 router.get('/rm-names', admin.listRmNames);
+// Distinct DSA names (assigned + onboarded referrers) — powers the DSA combobox.
+router.get('/dsa-names', admin.listDsaNames);
 
 router.get('/applications', admin.listApplications);
 router.get('/applications/:id', admin.getApplication);
@@ -37,6 +39,12 @@ router.patch(
   [body('rmName').optional({ checkFalsy: true }).isString().withMessage('rmName must be a string')],
   validate,
   admin.assignRm
+);
+router.patch(
+  '/applications/:id/assign-dsa',
+  [body('dsaName').optional({ checkFalsy: true }).isString().withMessage('dsaName must be a string')],
+  validate,
+  admin.assignDsa
 );
 // Share to one or more lenders. Multipart: lenderIds[] + documentIds[] (existing
 // docs to attach) + any newly uploaded `documents` files.
@@ -72,7 +80,6 @@ router.post(
   '/referrer-applications',
   [
     body('fullName').trim().notEmpty().withMessage('Name is required'),
-    body('referrerType').trim().notEmpty().withMessage('Referrer type is required'),
     body('email').isEmail().withMessage('Valid email required'),
     body('phone').trim().notEmpty().withMessage('Phone is required'),
   ],

@@ -5,7 +5,8 @@ import mongoose from 'mongoose';
 const referrerApplicationSchema = new mongoose.Schema(
   {
     fullName: { type: String, required: true, trim: true },
-    referrerType: { type: String, required: true, trim: true }, // DSA / Consultant / Referral Partner / Individual
+    // DSA & Connectors: the "referrer type" field was removed; kept optional for legacy records.
+    referrerType: { type: String, trim: true },
     firmName: { type: String, trim: true },
     email: { type: String, required: true, lowercase: true, trim: true },
     phone: { type: String, required: true, trim: true },

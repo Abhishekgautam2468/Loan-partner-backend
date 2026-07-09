@@ -28,10 +28,11 @@ function parseIdList(v) {
 // `statusCounts` and `loanTypes` are faceted over the filter WITHOUT the status
 // constraint, so the status pills/dropdown stay accurate while a status is selected.
 export const listApplications = asyncHandler(async (req, res) => {
-  const { status, q, from, to, loanType, rm, sort, page } = req.query;
+  const { status, q, from, to, loanType, rm, dsa, sort, page } = req.query;
 
   const baseFilter = {};
   if (rm && rm.trim()) baseFilter.rmName = new RegExp(rm.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  if (dsa && dsa.trim()) baseFilter.dsaName = new RegExp(dsa.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   if (from || to) {
     baseFilter.createdAt = {};
     if (from) baseFilter.createdAt.$gte = new Date(from);
@@ -118,8 +119,11 @@ export const updateStatus = asyncHandler(async (req, res) => {
   await StatusHistory.create({ applicationId: app._id, fromStatus, toStatus, changedByUserId: req.user._id, remarks });
   await logActivity({ actorUserId: req.user._id, action: 'application.status', targetType: 'Application', targetId: app._id, meta: { fromStatus, toStatus } });
 
-  const { subject, html } = statusEmail(app, toStatus, remarks);
-  await sendMail({ to: app.email, subject, html, type: 'status', applicationId: app._id });
+  // Notify the customer of the new status — except on Disbursed, which needs no intimation.
+  if (toStatus !== STATUS.DISBURSED) {
+    const { subject, html } = statusEmail(app, toStatus, remarks);
+    await sendMail({ to: app.email, subject, html, type: 'status', applicationId: app._id });
+  }
 
   res.json({ application: app });
 });
@@ -157,6 +161,41 @@ export const listRmNames = asyncHandler(async (req, res) => {
   }
   const names = [...seen.values()].sort((a, b) => a.localeCompare(b));
   res.json({ rmNames: names });
+});
+
+// PATCH /api/admin/applications/:id/assign-dsa  { dsaName }
+// Records the DSA / referrer credited with sourcing this proposal. Independent of status.
+export const assignDsa = asyncHandler(async (req, res) => {
+  const app = await Application.findById(req.params.id);
+  if (!app) throw new ApiError(404, 'Application not found');
+  let name = String(req.body.dsaName || '').trim();
+  // Reuse the existing spelling (case-insensitive) so "ravi" and "Ravi" don't split.
+  if (name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existing = await Application.findOne({ dsaName: new RegExp(`^${escaped}$`, 'i') }).select('dsaName');
+    if (existing?.dsaName) name = existing.dsaName;
+  }
+  app.dsaName = name;
+  await app.save();
+  await logActivity({ actorUserId: req.user._id, action: 'application.assignDsa', targetType: 'Application', targetId: app._id, meta: { dsaName: app.dsaName } });
+  res.json({ application: app });
+});
+
+// GET /api/admin/dsa-names → { dsaNames: [...] }
+// Distinct DSA names already assigned, merged with onboarded referrer names, so the
+// combobox suggests both real DSAs/referrers and any names already in use.
+export const listDsaNames = asyncHandler(async (req, res) => {
+  const seen = new Map();
+  const add = (raw) => {
+    const t = (raw || '').trim();
+    if (!t) return;
+    const k = t.toLowerCase();
+    if (!seen.has(k)) seen.set(k, t);
+  };
+  for (const raw of await Application.distinct('dsaName')) add(raw);
+  for (const r of await ReferrerApplication.find().select('fullName').lean()) add(r.fullName);
+  const names = [...seen.values()].sort((a, b) => a.localeCompare(b));
+  res.json({ dsaNames: names });
 });
 
 // POST /api/admin/applications/:id/share-to-lender
@@ -360,7 +399,7 @@ const REFERRER_STATUSES = LENDER_STATUSES;
 const REFERRER_CREATE_STATUSES = LENDER_CREATE_STATUSES;
 const REFERRER_TRANSITIONS = LENDER_TRANSITIONS;
 const REFERRER_EDITABLE = [
-  'fullName', 'referrerType', 'firmName', 'email', 'phone', 'city', 'state',
+  'fullName', 'firmName', 'email', 'phone', 'city', 'state',
   'pan', 'experience', 'monthlyVolume', 'message', 'products',
 ];
 
@@ -370,7 +409,7 @@ export const listReferrerApplications = asyncHandler(async (req, res) => {
   if (status) filter.status = status;
   if (q) {
     const rx = new RegExp(q.trim(), 'i');
-    const or = [{ fullName: rx }, { firmName: rx }, { email: rx }, { referrerType: rx }];
+    const or = [{ fullName: rx }, { firmName: rx }, { email: rx }];
     if (/^[0-9a-fA-F]{24}$/.test(q.trim())) or.push({ _id: q.trim() });
     filter.$or = or;
   }
@@ -379,9 +418,9 @@ export const listReferrerApplications = asyncHandler(async (req, res) => {
 });
 
 export const createReferrer = asyncHandler(async (req, res) => {
-  const { fullName, referrerType, firmName, email, phone, city, state, pan, experience, monthlyVolume, products, message, status } = req.body;
+  const { fullName, firmName, email, phone, city, state, pan, experience, monthlyVolume, products, message, status } = req.body;
   const referrer = await ReferrerApplication.create({
-    fullName, referrerType, firmName, email: String(email).toLowerCase(), phone, city, state,
+    fullName, firmName, email: String(email).toLowerCase(), phone, city, state,
     pan, experience, monthlyVolume,
     products: Array.isArray(products) ? products : (products ? [products] : []),
     message,

@@ -35,6 +35,7 @@ export const LOAN_TYPES = [
   'Sales Invoice Discounting',
   'Dealer Finance',
   'Vendor Finance',
+  'Working Capital',
   'Others',
 ];
 

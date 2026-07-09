@@ -62,7 +62,6 @@ router.post(
   submitLimiter,
   [
     body('fullName').trim().notEmpty().withMessage('Name is required'),
-    body('referrerType').trim().notEmpty().withMessage('Referrer type is required'),
     body('email').isEmail().withMessage('Valid email required'),
     body('phone').trim().notEmpty().withMessage('Phone is required'),
   ],

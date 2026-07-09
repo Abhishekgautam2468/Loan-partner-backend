@@ -19,6 +19,8 @@ const applicationSchema = new mongoose.Schema(
     approvedAmount: { type: Number, min: 0 },
     // Relationship Manager handling this proposal (set by admin during review).
     rmName: { type: String, trim: true },
+    // DSA / referrer credited with sourcing this proposal (set by admin during review).
+    dsaName: { type: String, trim: true },
     tenureMonths: { type: Number, min: 0 },
     purpose: { type: String, trim: true },
     // Extended KYC / eligibility data captured by the multi-step application form.

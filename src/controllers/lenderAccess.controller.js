@@ -32,7 +32,14 @@ export const requestCode = asyncHandler(async (req, res) => {
     lender.accessOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
     await lender.save();
     const { subject, html } = passwordOtpEmail(otp);
-    await sendMail({ to: lender.email, type: 'lender-access', subject, html });
+    const sent = await sendMail({ to: lender.email, type: 'lender-access', subject, html });
+    // Diagnostic: whether the OTP mail actually went out (false ⇒ SMTP not configured
+    // or the provider rejected it — the lender will never receive a code).
+    console.log(`[lender-access] OTP request app=${applicationId} email=${String(email || '').trim()} matched=yes sent=${sent}`);
+  } else {
+    // The email entered isn't a lender this application was shared with (often a typo
+    // or a different address than the one on the invite) — no code is ever sent.
+    console.warn(`[lender-access] OTP request app=${applicationId} email=${String(email || '').trim()} matched=NO — not a shared lender for this application`);
   }
   res.json({ message: 'If this email has access, a verification code has been sent.' });
 });
@@ -43,8 +50,18 @@ export const verifyCode = asyncHandler(async (req, res) => {
   const { applicationId, email, code } = req.body;
   const app = await Application.findById(applicationId);
   const lender = await sharedLenderFor(app, email);
-  if (!lender || !lender.accessOtp || !lender.accessOtpExpiry) throw new ApiError(400, 'Invalid or expired code');
-  if (lender.accessOtp !== sha256(code) || lender.accessOtpExpiry < new Date()) {
+  // Normalise to digits only so stray spaces / pasted formatting never cause a false mismatch.
+  const cleanCode = String(code || '').replace(/\D/g, '');
+  if (!lender || !lender.accessOtp || !lender.accessOtpExpiry) {
+    console.warn(`[lender-access] verify FAIL app=${applicationId} email=${String(email || '').trim()} reason=${!lender ? 'not-a-shared-lender' : 'no-code-on-record'}`);
+    throw new ApiError(400, 'Invalid or expired code');
+  }
+  if (lender.accessOtp !== sha256(cleanCode)) {
+    console.warn(`[lender-access] verify FAIL app=${applicationId} email=${String(email || '').trim()} reason=code-mismatch`);
+    throw new ApiError(400, 'Invalid or expired code');
+  }
+  if (lender.accessOtpExpiry < new Date()) {
+    console.warn(`[lender-access] verify FAIL app=${applicationId} email=${String(email || '').trim()} reason=expired`);
     throw new ApiError(400, 'Invalid or expired code');
   }
   lender.accessOtp = undefined;

@@ -242,6 +242,19 @@ await step('assign RM + filter + rm-names', async () => {
   expect(lower.application.rmName === 'Priya Sharma', `canonical ${lower.application.rmName}`);
 });
 
+await step('assign DSA + filter + dsa-names', async () => {
+  const r = await fetch(`${base}/admin/applications/${appId}/assign-dsa`, { method: 'PATCH', headers: A(), body: JSON.stringify({ dsaName: 'Ravi Mehta' }) });
+  const d = await j(r);
+  expect(r.status === 200 && d.application.dsaName === 'Ravi Mehta', `assign ${r.status}`);
+  const names = await j(await fetch(`${base}/admin/dsa-names`, { headers: A() }));
+  expect(names.dsaNames.includes('Ravi Mehta'), 'dsa-names should include the new DSA');
+  const filtered = await j(await fetch(`${base}/admin/applications?dsa=Ravi`, { headers: A() }));
+  expect(filtered.applications.length === 1 && filtered.applications[0].dsaName === 'Ravi Mehta', `filter got ${filtered.applications.length}`);
+  // Case-insensitive canonicalization to the existing spelling.
+  const lower = await j(await fetch(`${base}/admin/applications/${appId}/assign-dsa`, { method: 'PATCH', headers: A(), body: JSON.stringify({ dsaName: 'ravi mehta' }) }));
+  expect(lower.application.dsaName === 'Ravi Mehta', `canonical ${lower.application.dsaName}`);
+});
+
 await step('re-apply (decided category) with reuseDocumentsFrom', async () => {
   // appId is now Approved, so re-applying the same category is allowed.
   const fd = new FormData();
