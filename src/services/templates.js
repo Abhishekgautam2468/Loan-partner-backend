@@ -124,7 +124,6 @@ export const managerShareEmail = (app) => {
       row('Type', app.loanType), row('Amount', inr(app.amountRequested)),
       row('Tenure', app.tenureMonths ? `${app.tenureMonths} months` : ''),
       row('Expected ROI', d.expectedRoi ? `${d.expectedRoi}% p.a.` : ''),
-      row('External credit rating', d.externalCreditRating),
       row('Purpose', app.purpose),
     ])}
     ${section('Applicant', [
