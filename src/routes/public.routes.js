@@ -8,6 +8,7 @@ import { AADHAAR_RE, PAN_RE } from '../utils/validators.js';
 import * as appCtrl from '../controllers/application.controller.js';
 import * as lenderCtrl from '../controllers/lender.controller.js';
 import * as referrerCtrl from '../controllers/referrer.controller.js';
+import * as advisorCtrl from '../controllers/advisor.controller.js';
 
 // Unauthenticated, public-facing endpoints (website "Apply Now" form).
 const router = Router();
@@ -67,6 +68,20 @@ router.post(
   ],
   validate,
   referrerCtrl.createReferrerApplication
+);
+
+router.post(
+  '/advisor-enquiry',
+  submitLimiter,
+  [
+    body('name').trim().notEmpty().withMessage('Name is required'),
+    body('email').isEmail().withMessage('Valid email required'),
+    body('phone').trim().notEmpty().withMessage('Contact number is required'),
+    body('address').trim().notEmpty().withMessage('Address is required'),
+    body('amountRequested').trim().notEmpty().withMessage('Requested loan amount is required'),
+  ],
+  validate,
+  advisorCtrl.createAdvisorEnquiry
 );
 
 export default router;

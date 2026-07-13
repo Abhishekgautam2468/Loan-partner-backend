@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import archiver from 'archiver';
 import Application from '../models/Application.js';
 import LenderApplication from '../models/LenderApplication.js';
 import Document from '../models/Document.js';
@@ -107,6 +108,61 @@ export const getApplication = asyncHandler(async (req, res) => {
     },
     documents: docs,
   });
+});
+
+// Build a safe, unique filename for a document inside the ZIP. Prefixes the
+// category (when meaningful) and disambiguates collisions with a numeric suffix.
+function zipEntryName(doc, used) {
+  const clean = (s) => String(s || '').replace(/[/\\:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim();
+  const orig = clean(doc.originalName) || 'document';
+  const dot = orig.lastIndexOf('.');
+  const base = dot > 0 ? orig.slice(0, dot) : orig;
+  const ext = dot > 0 ? orig.slice(dot) : '';
+  const cat = doc.category && doc.category !== 'Other' ? `${clean(doc.category)} - ` : '';
+  let name = `${cat}${base}${ext}`;
+  let n = 2;
+  while (used.has(name.toLowerCase())) { name = `${cat}${base} (${n})${ext}`; n += 1; }
+  used.add(name.toLowerCase());
+  return name;
+}
+
+// GET /api/lender/applications/:id/documents/archive  (lender token)
+// Streams every document shared with lenders as a single ZIP download.
+export const downloadArchive = asyncHandler(async (req, res) => {
+  assertScope(req);
+  const app = await Application.findById(req.params.id).select('sharedDocumentIds fullName panNumber');
+  if (!app) throw new ApiError(404, 'Application not found');
+  const docs = await Document.find({ _id: { $in: app.sharedDocumentIds || [] } });
+  if (docs.length === 0) throw new ApiError(404, 'No documents shared for this application');
+
+  const safe = (s) => String(s || '').replace(/[/\\:*?"<>|]+/g, '_').replace(/\s+/g, '_').trim();
+  const zipName = `${safe(app.fullName) || 'application'}_${safe(app.panNumber) || String(app._id).slice(-6)}_documents.zip`;
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  // Once headers/data have been sent we can no longer switch to a JSON error response;
+  // log and destroy the stream so the client sees a truncated (failed) download.
+  archive.on('error', (err) => {
+    console.error('[lender-access] archive error', err.message);
+    res.destroy(err);
+  });
+  archive.pipe(res);
+
+  const used = new Set();
+  for (const doc of docs) {
+    try {
+      const url = signedUrl(doc.cloudinaryPublicId, { resourceType: doc.resourceType });
+      const resp = await fetch(url);
+      if (!resp.ok) { console.error(`[lender-access] fetch doc ${doc._id} failed: ${resp.status}`); continue; }
+      const buf = Buffer.from(await resp.arrayBuffer());
+      archive.append(buf, { name: zipEntryName(doc, used) });
+    } catch (err) {
+      console.error(`[lender-access] skip doc ${doc._id}:`, err.message);
+    }
+  }
+  await archive.finalize();
 });
 
 // GET /api/lender/applications/:id/documents/:docId  (lender token)

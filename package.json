@@ -12,6 +12,7 @@
     "backfill:pan": "node src/scripts/backfillUserPan.js"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.5.1",
     "cors": "^2.8.5",

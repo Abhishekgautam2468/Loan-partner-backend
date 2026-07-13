@@ -26,6 +26,9 @@ router.post(
 );
 
 router.get('/applications/:id', requireLenderToken, lender.getApplication);
+// `/documents/archive` must be declared before `/documents/:docId` so it isn't
+// captured as a document id.
+router.get('/applications/:id/documents/archive', requireLenderToken, lender.downloadArchive);
 router.get('/applications/:id/documents/:docId', requireLenderToken, lender.getDocumentUrl);
 
 export default router;
